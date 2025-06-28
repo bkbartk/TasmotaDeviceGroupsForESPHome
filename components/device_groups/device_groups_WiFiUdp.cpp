@@ -30,15 +30,27 @@ device_groups_WiFiUDP::device_groups_WiFiUDP() : sock_fd(-1), is_connected(false
 }
 
 device_groups_WiFiUDP::~device_groups_WiFiUDP() {
+    // Always close socket first
+    if (sock_fd >= 0) {
+        close(sock_fd);
+        sock_fd = -1;
+    }
+    
+    // Call stop to clean up other resources
     stop();
+    
+    // Double-check buffer cleanup in case stop() failed
     if (send_buffer) {
         free(send_buffer);
         send_buffer = nullptr;
+        send_buffer_size = 0;
     }
     if (recv_buffer) {
         free(recv_buffer);
         recv_buffer = nullptr;
+        recv_buffer_size = 0;
     }
+    
     ESP_LOGCONFIG(TAG, "ESP-IDF WiFiUDP implementation destroyed");
 }
 
@@ -273,6 +285,11 @@ void device_groups_WiFiUDP::stop() {
 
 bool device_groups_WiFiUDP::beginPacket(const char* ip, uint16_t port) {
     if (!validateSocket()) {
+        // Close existing socket before creating new one
+        if (sock_fd >= 0) {
+            close(sock_fd);
+            sock_fd = -1;
+        }
         if (!initSocket()) {
             ESP_LOGE(TAG, "Failed to initialize socket for packet to %s:%d", ip, port);
             return false;
@@ -287,6 +304,11 @@ bool device_groups_WiFiUDP::beginPacket(const char* ip, uint16_t port) {
 
 bool device_groups_WiFiUDP::beginPacket(uint32_t ip, uint16_t port) {
     if (!validateSocket()) {
+        // Close existing socket before creating new one
+        if (sock_fd >= 0) {
+            close(sock_fd);
+            sock_fd = -1;
+        }
         if (!initSocket()) {
             ESP_LOGE(TAG, "Failed to initialize socket for packet to %u:%d", ip, port);
             return false;
@@ -377,6 +399,7 @@ size_t device_groups_WiFiUDP::write(uint8_t byte) {
         char* new_buffer = (char*)realloc(send_buffer, new_size);
         if (!new_buffer) {
             ESP_LOGE(TAG, "Failed to resize send buffer from %d to %d bytes", send_buffer_size, new_size);
+            // Don't free send_buffer here as it's still valid and needed
             return 0;
         }
         send_buffer = new_buffer;
@@ -405,6 +428,7 @@ size_t device_groups_WiFiUDP::write(const uint8_t* data, size_t size) {
         char* new_buffer = (char*)realloc(send_buffer, new_size);
         if (!new_buffer) {
             ESP_LOGE(TAG, "Failed to resize send buffer from %d to %d bytes", send_buffer_size, new_size);
+            // Don't free send_buffer here as it's still valid and needed
             return 0;
         }
         send_buffer = new_buffer;
