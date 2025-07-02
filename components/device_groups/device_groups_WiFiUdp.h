@@ -68,6 +68,12 @@ private:
      */
     bool setSocketOptions();
 
+    /**
+     * @brief Check if network is ready for UDP operations
+     * @return true if network is ready, false otherwise
+     */
+    bool isNetworkReady();
+
 public:
     /**
      * @brief Default constructor
@@ -132,6 +138,8 @@ public:
      * @return Number of bytes written
      */
     size_t write(const uint8_t* buffer, size_t size);
+    
+
     
     /**
      * @brief Parse incoming packet

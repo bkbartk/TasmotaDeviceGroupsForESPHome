@@ -319,9 +319,7 @@ size_t device_groups_WiFiUDP::write(const uint8_t* data, size_t size) {
     return size;
 }
 
-size_t device_groups_WiFiUDP::write(const char* str) {
-    return write((const uint8_t*)str, strlen(str));
-}
+
 
 int device_groups_WiFiUDP::parsePacket() {
     if (sock_fd < 0) {
