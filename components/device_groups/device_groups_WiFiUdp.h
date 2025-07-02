@@ -56,6 +56,18 @@ private:
     uint32_t last_packet_time;
     static const uint32_t DEDUP_WINDOW_MS = 100; // 100ms window for deduplication
 
+    /**
+     * @brief Initialize socket with proper options
+     * @return true if successful, false otherwise
+     */
+    bool initSocket();
+    
+    /**
+     * @brief Set socket options for non-blocking operation
+     * @return true if successful, false otherwise
+     */
+    bool setSocketOptions();
+
 public:
     /**
      * @brief Default constructor
@@ -76,25 +88,6 @@ public:
      * @brief Destructor
      */
     ~device_groups_WiFiUDP();
-    
-    /**
-     * @brief Check if network is ready for UDP operations
-     * @return true if network is ready, false otherwise
-     */
-    bool isNetworkReady();
-    
-    /**
-     * @brief Validate socket state and reinitialize if needed
-     * @return true if socket is valid, false otherwise
-     */
-    bool validateSocket();
-    
-    /**
-     * @brief Begin UDP communication on specified port
-     * @param port The port number to bind to
-     * @return true if successful, false otherwise
-     */
-    bool begin(uint16_t port);
     
     /**
      * @brief Begin UDP communication with multicast support
@@ -120,22 +113,6 @@ public:
     
     /**
      * @brief Begin packet transmission to specified IP and port
-     * @param ip The destination IP address
-     * @param port The destination port
-     * @return true if successful, false otherwise
-     */
-    bool beginPacket(const char* ip, uint16_t port);
-    
-    /**
-     * @brief Begin packet transmission to specified IP and port
-     * @param ip The destination IP address as uint32_t
-     * @param port The destination port
-     * @return true if successful, false otherwise
-     */
-    bool beginPacket(uint32_t ip, uint16_t port);
-    
-    /**
-     * @brief Begin packet transmission to specified IP and port
      * @param ip The destination IP address as IPAddress
      * @param port The destination port
      * @return true if successful, false otherwise
@@ -149,13 +126,6 @@ public:
     bool endPacket();
     
     /**
-     * @brief Write a single byte to the packet
-     * @param byte The byte to write
-     * @return Number of bytes written (1 if successful, 0 otherwise)
-     */
-    size_t write(uint8_t byte);
-    
-    /**
      * @brief Write data to the packet
      * @param buffer Pointer to the data buffer
      * @param size Size of the data to write
@@ -164,29 +134,10 @@ public:
     size_t write(const uint8_t* buffer, size_t size);
     
     /**
-     * @brief Write a string to the packet
-     * @param str The string to write
-     * @return Number of bytes written
-     */
-    size_t write(const char* str);
-    
-    /**
      * @brief Parse incoming packet
      * @return Size of the received packet, 0 if no packet available
      */
     int parsePacket();
-    
-    /**
-     * @brief Get the size of the received packet
-     * @return Size of the packet in bytes
-     */
-    int available();
-    
-    /**
-     * @brief Read a single byte from the received packet
-     * @return The byte read, or -1 if no data available
-     */
-    int read();
     
     /**
      * @brief Read data from the received packet
@@ -195,20 +146,6 @@ public:
      * @return Number of bytes read
      */
     int read(uint8_t* buffer, size_t size);
-    
-    /**
-     * @brief Read data from the received packet
-     * @param buffer Pointer to the buffer to store the data
-     * @param size Maximum number of bytes to read
-     * @return Number of bytes read
-     */
-    int read(char* buffer, size_t size);
-    
-    /**
-     * @brief Peek at the next byte without removing it from the buffer
-     * @return The next byte, or -1 if no data available
-     */
-    int peek();
     
     /**
      * @brief Flush the receive buffer
@@ -220,55 +157,6 @@ public:
      * @return IP address as IPAddress object
      */
     IPAddress remoteIP();
-    
-    /**
-     * @brief Get the remote port of the received packet
-     * @return Port number
-     */
-    uint16_t remotePort();
-    
-    /**
-     * @brief Check if UDP connection is active
-     * @return true if connected, false otherwise
-     */
-    bool connected();
-    
-    /**
-     * @brief Set socket timeout
-     * @param timeout_ms Timeout in milliseconds
-     */
-    void setTimeout(int timeout_ms);
-    
-    /**
-     * @brief Get the local port number
-     * @return Local port number, 0 if not bound
-     */
-    uint16_t localPort();
-    
-    /**
-     * @brief Get the local IP address
-     * @return Local IP address as string
-     */
-    const char* localIP();
-    
-    /**
-     * @brief Initialize socket with proper options
-     * @return true if successful, false otherwise
-     */
-    bool initSocket();
-    
-    /**
-     * @brief Set socket options for non-blocking operation
-     * @return true if successful, false otherwise
-     */
-    bool setSocketOptions();
-    
-    /**
-     * @brief Convert IP address to string
-     * @param ip IP address as uint32_t
-     * @return IP address as string
-     */
-    static const char* ipToString(uint32_t ip);
 };
 
 #ifdef __cplusplus

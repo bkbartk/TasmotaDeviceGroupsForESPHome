@@ -14,6 +14,7 @@
 #define DEFAULT_BUFFER_SIZE 1024
 #define MAX_RETRIES 3
 #define RETRY_DELAY_MS 10
+#define DEDUP_WINDOW_MS 100  // 100ms window for deduplication
 
 static const char *const TAG = "dgr";
 
@@ -52,27 +53,6 @@ device_groups_WiFiUDP::~device_groups_WiFiUDP() {
     }
     
     ESP_LOGCONFIG(TAG, "ESP-IDF WiFiUDP implementation destroyed");
-}
-
-bool device_groups_WiFiUDP::isNetworkReady() {
-    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (netif == nullptr) {
-        ESP_LOGW(TAG, "No WiFi STA interface found");
-        return false;
-    }
-    
-    esp_netif_ip_info_t ip_info;
-    if (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to get IP info");
-        return false;
-    }
-    
-    if (ip_info.ip.addr == 0) {
-        ESP_LOGW(TAG, "No valid IP address");
-        return false;
-    }
-    
-    return true;
 }
 
 bool device_groups_WiFiUDP::initSocket() {
@@ -121,62 +101,21 @@ bool device_groups_WiFiUDP::setSocketOptions() {
     return true;
 }
 
-bool device_groups_WiFiUDP::validateSocket() {
-    if (sock_fd < 0) {
+bool device_groups_WiFiUDP::isNetworkReady() {
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif == nullptr) {
+        ESP_LOGW(TAG, "No WiFi STA interface found");
         return false;
     }
-    
-    // Only check socket validity if we haven't checked recently
-    // This reduces overhead and prevents excessive socket recreation
-    static uint32_t last_validation_time = 0;
-    uint32_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
-    
-    // Only validate every 5 seconds to reduce overhead
-    if (current_time - last_validation_time < 5000) {
-        return true;
-    }
-    
-    last_validation_time = current_time;
-    
-    // Check if socket is still valid
-    int error = 0;
-    socklen_t len = sizeof(error);
-    if (getsockopt(sock_fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) {
-        ESP_LOGW(TAG, "Socket error detected (error: %d), reinitializing", error);
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to get IP info");
         return false;
     }
-    
-    return true;
-}
-
-bool device_groups_WiFiUDP::begin(uint16_t port) {
-    ESP_LOGCONFIG(TAG, "=== WiFiUDP begin called for port %d ===", port);
-    
-    if (!isNetworkReady()) {
-        ESP_LOGCONFIG(TAG, "Network not ready for UDP begin on port %d", port);
+    if (ip_info.ip.addr == 0) {
+        ESP_LOGW(TAG, "No valid IP address");
         return false;
     }
-    
-    if (!initSocket()) {
-        return false;
-    }
-    
-    struct sockaddr_in local_addr;
-    memset(&local_addr, 0, sizeof(local_addr));
-    local_addr.sin_family = AF_INET;
-    local_addr.sin_addr.s_addr = INADDR_ANY;
-    local_addr.sin_port = htons(port);
-    
-    if (bind(sock_fd, (struct sockaddr*)&local_addr, sizeof(local_addr)) < 0) {
-        ESP_LOGCONFIG(TAG, "Failed to bind UDP socket to port %d: %s", port, strerror(errno));
-        close(sock_fd);
-        sock_fd = -1;
-        return false;
-    }
-    
-    is_connected = true;
-    ESP_LOGVV(TAG, "UDP socket bound to port %d", port);
-    ESP_LOGCONFIG(TAG, "=== WiFiUDP begin successful for port %d ===", port);
     return true;
 }
 
@@ -283,44 +222,6 @@ void device_groups_WiFiUDP::stop() {
     ESP_LOGVV(TAG, "UDP socket stopped");
 }
 
-bool device_groups_WiFiUDP::beginPacket(const char* ip, uint16_t port) {
-    if (!validateSocket()) {
-        // Close existing socket before creating new one
-        if (sock_fd >= 0) {
-            close(sock_fd);
-            sock_fd = -1;
-        }
-        if (!initSocket()) {
-            ESP_LOGE(TAG, "Failed to initialize socket for packet to %s:%d", ip, port);
-            return false;
-        }
-    }
-    
-    remote_addr.sin_addr.s_addr = inet_addr(ip);
-    remote_addr.sin_port = htons(port);
-    
-    return true;
-}
-
-bool device_groups_WiFiUDP::beginPacket(uint32_t ip, uint16_t port) {
-    if (!validateSocket()) {
-        // Close existing socket before creating new one
-        if (sock_fd >= 0) {
-            close(sock_fd);
-            sock_fd = -1;
-        }
-        if (!initSocket()) {
-            ESP_LOGE(TAG, "Failed to initialize socket for packet to %u:%d", ip, port);
-            return false;
-        }
-    }
-    
-    remote_addr.sin_addr.s_addr = htonl(ip);
-    remote_addr.sin_port = htons(port);
-    
-    return true;
-}
-
 bool device_groups_WiFiUDP::beginPacket(const IPAddress& ip, uint16_t port) {
     // Don't recreate socket unnecessarily - just validate existing one
     if (sock_fd < 0) {
@@ -382,35 +283,6 @@ bool device_groups_WiFiUDP::endPacket() {
     return false;
 }
 
-size_t device_groups_WiFiUDP::write(uint8_t byte) {
-    if (!send_buffer) {
-        send_buffer = (char*)malloc(DEFAULT_BUFFER_SIZE);
-        send_buffer_size = DEFAULT_BUFFER_SIZE;
-        if (!send_buffer) {
-            ESP_LOGE(TAG, "Failed to allocate send buffer for UDP write");
-            return 0;
-        }
-        memset(send_buffer, 0, send_buffer_size);
-    }
-    
-    if (send_data_length >= send_buffer_size) {
-        // Resize buffer if needed
-        size_t new_size = send_buffer_size * 2;
-        char* new_buffer = (char*)realloc(send_buffer, new_size);
-        if (!new_buffer) {
-            ESP_LOGE(TAG, "Failed to resize send buffer from %d to %d bytes", send_buffer_size, new_size);
-            // Don't free send_buffer here as it's still valid and needed
-            return 0;
-        }
-        send_buffer = new_buffer;
-        send_buffer_size = new_size;
-        ESP_LOGVV(TAG, "Send buffer resized to %d bytes", new_size);
-    }
-    
-    send_buffer[send_data_length++] = byte;
-    return 1;
-}
-
 size_t device_groups_WiFiUDP::write(const uint8_t* data, size_t size) {
     if (!send_buffer) {
         send_buffer = (char*)malloc(DEFAULT_BUFFER_SIZE);
@@ -428,7 +300,11 @@ size_t device_groups_WiFiUDP::write(const uint8_t* data, size_t size) {
         char* new_buffer = (char*)realloc(send_buffer, new_size);
         if (!new_buffer) {
             ESP_LOGE(TAG, "Failed to resize send buffer from %d to %d bytes", send_buffer_size, new_size);
-            // Don't free send_buffer here as it's still valid and needed
+            // Free the old buffer to prevent memory leaks
+            free(send_buffer);
+            send_buffer = nullptr;
+            send_buffer_size = 0;
+            send_data_length = 0;
             return 0;
         }
         send_buffer = new_buffer;
@@ -516,13 +392,6 @@ int device_groups_WiFiUDP::parsePacket() {
     return 0;
 }
 
-int device_groups_WiFiUDP::read() {
-    if (recv_read_position >= recv_data_length) {
-        return -1;
-    }
-    return (int)(unsigned char)recv_buffer[recv_read_position++];
-}
-
 int device_groups_WiFiUDP::read(uint8_t* data, size_t size) {
     if (recv_read_position >= recv_data_length) {
         return -1;
@@ -535,17 +404,6 @@ int device_groups_WiFiUDP::read(uint8_t* data, size_t size) {
     recv_read_position += to_read;
     
     return to_read;
-}
-
-int device_groups_WiFiUDP::read(char* data, size_t size) {
-    return read((uint8_t*)data, size);
-}
-
-int device_groups_WiFiUDP::peek() {
-    if (recv_read_position >= recv_data_length) {
-        return -1;
-    }
-    return (int)(unsigned char)recv_buffer[recv_read_position];
 }
 
 void device_groups_WiFiUDP::flush() {
@@ -561,89 +419,6 @@ IPAddress device_groups_WiFiUDP::remoteIP() {
     // Use sender_addr for received packets, remote_addr for sent packets
     uint32_t ip = ntohl(sender_addr.sin_addr.s_addr);
     return IPAddress((ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
-}
-
-uint16_t device_groups_WiFiUDP::remotePort() {
-    // Use sender_addr for received packets, remote_addr for sent packets
-    return ntohs(sender_addr.sin_port);
-}
-
-bool device_groups_WiFiUDP::connected() {
-    return is_connected && sock_fd >= 0 && validateSocket();
-}
-
-void device_groups_WiFiUDP::setTimeout(int timeout_ms) {
-    if (sock_fd >= 0) {
-        struct timeval tv;
-        tv.tv_sec = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-        if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-            ESP_LOGW(TAG, "Failed to set socket timeout: %s", strerror(errno));
-        }
-    }
-}
-
-uint16_t device_groups_WiFiUDP::localPort() {
-    if (sock_fd < 0) {
-        return 0;
-    }
-    
-    struct sockaddr_in addr;
-    socklen_t len = sizeof(addr);
-    if (getsockname(sock_fd, (struct sockaddr*)&addr, &len) < 0) {
-        ESP_LOGW(TAG, "Failed to get local port: %s", strerror(errno));
-        return 0;
-    }
-    return ntohs(addr.sin_port);
-}
-
-const char* device_groups_WiFiUDP::localIP() {
-    static char ip_str[16];
-    
-    // Get the default network interface (usually WiFi STA)
-    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (netif == nullptr) {
-        // Try to get any available network interface
-        esp_netif_t* netif_list[4]; // Use a reasonable default size
-        int netif_count = esp_netif_get_nr_of_ifs();
-        if (netif_count > 0 && netif_count <= 4) {
-            // Get the first available interface
-            esp_netif_t* default_netif = esp_netif_get_default_netif();
-            if (default_netif != nullptr) {
-                netif = default_netif;
-            } else {
-                // Fallback: try to get any interface
-                esp_netif_t* current_netif = nullptr;
-                esp_netif_t* temp_netif = esp_netif_next_unsafe(nullptr);
-                if (temp_netif != nullptr) {
-                    netif = temp_netif;
-                }
-            }
-        }
-    }
-    
-    if (netif != nullptr) {
-        esp_netif_ip_info_t ip_info;
-        if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
-            inet_ntop(AF_INET, &ip_info.ip.addr, ip_str, sizeof(ip_str));
-            return ip_str;
-        }
-    }
-    
-    ESP_LOGW(TAG, "Failed to get local IP address");
-    return "0.0.0.0";
-}
-
-int device_groups_WiFiUDP::available() {
-    return recv_data_length - recv_read_position;
-}
-
-const char* device_groups_WiFiUDP::ipToString(uint32_t ip) {
-    static char ip_str[16];
-    struct in_addr addr;
-    addr.s_addr = htonl(ip);
-    inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
-    return ip_str;
 }
 
 #endif  // USE_ESP_IDF || ESP_IDF_VERSION || CONFIG_IDF_TARGET 
