@@ -238,8 +238,29 @@ bool device_groups_WiFiUDP::endPacket() {
         return false;
     }
     
+    // Check if we're sending an ACK packet for diagnostic purposes
+    bool sending_ack = false;
+    uint16_t packet_sequence = 0;
+    if (send_data_length >= 20 && strncmp(send_buffer, "TASMOTA_DGR", 11) == 0) {
+        if (send_data_length > 16) {
+            uint16_t flags = (send_buffer[16] << 8) | send_buffer[15];
+            sending_ack = (flags & 0x08) != 0;  // DGR_FLAG_ACK = 8
+            
+            // Extract sequence number (typically at offset 13-14)
+            if (send_data_length > 14) {
+                packet_sequence = (send_buffer[14] << 8) | send_buffer[13];
+            }
+        }
+    }
+    
     ESP_LOGVV(TAG, "Attempting to send UDP packet: %d bytes to %s:%d", 
              send_data_length, inet_ntoa(remote_addr.sin_addr), ntohs(remote_addr.sin_port));
+    
+    // Log ACK packets for debugging
+    if (sending_ack) {
+        ESP_LOGD(TAG, "Sending ACK packet to %s:%d (acknowledging seq=%u)", 
+                 inet_ntoa(remote_addr.sin_addr), ntohs(remote_addr.sin_port), packet_sequence);
+    }
     
     int retries = MAX_RETRIES;
     while (retries-- > 0) {
@@ -367,8 +388,28 @@ int device_groups_WiFiUDP::parsePacket() {
         // Store sender info separately - DON'T overwrite remote_addr!
         sender_addr = temp_sender_addr;
         
+        // Check if this is an ACK packet for diagnostic purposes
+        bool is_ack_response = false;
+        uint16_t received_sequence = 0;
+        if (received >= 20 && strncmp(recv_buffer, "TASMOTA_DGR", 11) == 0) {
+            if (received > 16) {
+                uint16_t flags = (recv_buffer[16] << 8) | recv_buffer[15];
+                is_ack_response = (flags & 0x08) != 0;  // DGR_FLAG_ACK = 8
+            }
+            // Extract sequence number for diagnostics
+            if (received > 14) {
+                received_sequence = (recv_buffer[14] << 8) | recv_buffer[13];
+            }
+        }
+        
         ESP_LOGVV(TAG, "Received UDP packet: %d bytes from %s:%d (hash: 0x%08x)", 
                  (int)received, inet_ntoa(sender_addr.sin_addr), ntohs(sender_addr.sin_port), packet_hash);
+        
+        // Log ACK packets for debugging
+        if (is_ack_response) {
+            ESP_LOGD(TAG, "ACK packet received from %s:%d (acknowledging seq=%u)", 
+                     inet_ntoa(sender_addr.sin_addr), ntohs(sender_addr.sin_port), received_sequence);
+        }
         
         return recv_data_length;
     } else if (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
