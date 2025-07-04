@@ -402,16 +402,21 @@ void device_groups::SendReceiveDeviceGroupMessage(struct device_group *device_gr
       // Mixed-device compatibility: Accept any ACK from a device within reasonable time
       // LibreTiny and ESPHome devices may send ACKs with their own sequence numbers
       // instead of echoing back the acknowledged sequence number
-      if (message_sequence > device_group_member->acked_sequence ||
-          device_group_member->acked_sequence - message_sequence < 64536) {
-        // Normal case: ACK with correct sequence number
+      
+      // Check if ACK sequence is within reasonable range of our outgoing sequence (±100)
+      uint16_t seq_diff = (message_sequence > device_group->outgoing_sequence) ? 
+                          (message_sequence - device_group->outgoing_sequence) :
+                          (device_group->outgoing_sequence - message_sequence);
+                          
+      if (seq_diff <= 100 && message_sequence > device_group_member->acked_sequence) {
+        // Normal case: ACK with correct or reasonably close sequence number
         device_group_member->acked_sequence = message_sequence;
       } else {
         // Mixed-device case: Accept any ACK and advance to our current outgoing sequence
         // This prevents retry loops when devices send ACKs with wrong sequence numbers
         device_group_member->acked_sequence = device_group->outgoing_sequence;
-        ESP_LOGD(TAG, "Mixed-device ACK accepted: seq=%u, advancing acked_sequence to %u", 
-                 message_sequence, device_group_member->acked_sequence);
+        ESP_LOGD(TAG, "Mixed-device ACK accepted: seq=%u (diff=%u), advancing acked_sequence to %u", 
+                 message_sequence, seq_diff, device_group_member->acked_sequence);
       }
     }
     goto write_log;
