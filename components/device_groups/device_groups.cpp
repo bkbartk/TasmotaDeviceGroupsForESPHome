@@ -398,26 +398,14 @@ void device_groups::SendReceiveDeviceGroupMessage(struct device_group *device_gr
   // If this is a received ack message, save the message sequence if it's newer than the last ack we
   // received from this member.
   if (flags == DGR_FLAG_ACK) {
-    if (received && device_group_member) {
-      // Mixed-device compatibility: Accept any ACK from a device within reasonable time
-      // LibreTiny and ESPHome devices may send ACKs with their own sequence numbers
-      // instead of echoing back the acknowledged sequence number
-      
-      // Check if ACK sequence is within reasonable range of our outgoing sequence (±100)
-      uint16_t seq_diff = (message_sequence > device_group->outgoing_sequence) ? 
-                          (message_sequence - device_group->outgoing_sequence) :
-                          (device_group->outgoing_sequence - message_sequence);
-                          
-      if (seq_diff <= 100 && message_sequence > device_group_member->acked_sequence) {
-        // Normal case: ACK with correct or reasonably close sequence number
-        device_group_member->acked_sequence = message_sequence;
-      } else {
-        // Mixed-device case: Accept any ACK and advance to our current outgoing sequence
-        // This prevents retry loops when devices send ACKs with wrong sequence numbers
-        device_group_member->acked_sequence = device_group->outgoing_sequence;
-        ESP_LOGD(TAG, "Mixed-device ACK accepted: seq=%u (diff=%u), advancing acked_sequence to %u", 
-                 message_sequence, seq_diff, device_group_member->acked_sequence);
-      }
+    if (received && device_group_member &&
+        (message_sequence > device_group_member->acked_sequence ||
+         device_group_member->acked_sequence - message_sequence < 64536)) {
+      // Mixed-device compatibility: Use our outgoing sequence instead of ACK sequence
+      // This prevents retry loops when devices send ACKs with wrong sequence numbers
+      device_group_member->acked_sequence = device_group->outgoing_sequence;
+      ESP_LOGD(TAG, "ACK accepted: seq=%u, advancing acked_sequence to %u", 
+               message_sequence, device_group_member->acked_sequence);
     }
     goto write_log;
   }
