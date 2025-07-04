@@ -398,14 +398,21 @@ void device_groups::SendReceiveDeviceGroupMessage(struct device_group *device_gr
   // If this is a received ack message, save the message sequence if it's newer than the last ack we
   // received from this member.
   if (flags == DGR_FLAG_ACK) {
-    if (received && device_group_member &&
-        (message_sequence > device_group_member->acked_sequence ||
-         device_group_member->acked_sequence - message_sequence < 64536)) {
-      // Mixed-device compatibility: Use our outgoing sequence instead of ACK sequence
-      // This prevents retry loops when devices send ACKs with wrong sequence numbers
-      device_group_member->acked_sequence = device_group->outgoing_sequence;
-      ESP_LOGD(TAG, "ACK accepted: seq=%u, advancing acked_sequence to %u", 
-               message_sequence, device_group_member->acked_sequence);
+    if (received && device_group_member) {
+      ESP_LOGD(TAG, "ACK received: seq=%u, current acked=%u, outgoing=%u", 
+               message_sequence, device_group_member->acked_sequence, device_group->outgoing_sequence);
+      
+      if (message_sequence > device_group_member->acked_sequence ||
+          device_group_member->acked_sequence - message_sequence < 64536) {
+        // Mixed-device compatibility: Use our outgoing sequence instead of ACK sequence
+        // This prevents retry loops when devices send ACKs with wrong sequence numbers
+        device_group_member->acked_sequence = device_group->outgoing_sequence;
+        ESP_LOGD(TAG, "ACK accepted: seq=%u, advancing acked_sequence to %u", 
+                 message_sequence, device_group_member->acked_sequence);
+      } else {
+        ESP_LOGD(TAG, "ACK rejected: seq=%u, current acked=%u", 
+                 message_sequence, device_group_member->acked_sequence);
+      }
     }
     goto write_log;
   }
