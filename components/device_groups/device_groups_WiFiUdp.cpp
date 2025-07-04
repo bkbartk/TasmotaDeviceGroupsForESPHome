@@ -314,8 +314,13 @@ bool device_groups_WiFiUDP::endPacket() {
              
     // Log ACK packets at higher verbosity for debugging
     if (sending_ack) {
-        ESP_LOGD(TAG, "Sending ACK packet to %s:%d (seq=%u)", 
+        ESP_LOGD(TAG, "Sending ACK packet to %s:%d (acknowledging seq=%u)", 
                  inet_ntoa(remote_addr.sin_addr), ntohs(remote_addr.sin_port), packet_sequence);
+    } else {
+        // Log non-ACK packets to help correlate with ACK responses
+        ESP_LOGD(TAG, "Sending message to %s:%d (seq=%u, flags=0x%02x)", 
+                 inet_ntoa(remote_addr.sin_addr), ntohs(remote_addr.sin_port), packet_sequence, 
+                 (send_data_length > 16) ? ((send_buffer[16] << 8) | send_buffer[15]) : 0);
     }
     
     // If we detect a retry loop, introduce progressive delays to reduce flooding
@@ -511,8 +516,13 @@ int device_groups_WiFiUDP::parsePacket() {
         
         // Log ACK packets at higher verbosity for debugging
         if (is_ack_response) {
-            ESP_LOGD(TAG, "ACK packet received from %s:%d (seq=%u)", 
+            ESP_LOGD(TAG, "ACK packet received from %s:%d (acknowledging seq=%u)", 
                      inet_ntoa(sender_addr.sin_addr), ntohs(sender_addr.sin_port), received_sequence);
+        } else {
+            // Log non-ACK packets to help correlate with ACK responses
+            ESP_LOGD(TAG, "Message received from %s:%d (seq=%u, flags=0x%02x)", 
+                     inet_ntoa(sender_addr.sin_addr), ntohs(sender_addr.sin_port), received_sequence,
+                     (received > 16) ? ((recv_buffer[16] << 8) | recv_buffer[15]) : 0);
         }
         
         return recv_data_length;
