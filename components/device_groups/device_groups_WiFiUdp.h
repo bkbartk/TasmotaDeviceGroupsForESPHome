@@ -55,6 +55,16 @@ private:
     uint32_t last_packet_hash;
     uint32_t last_packet_time;
     static const uint32_t DEDUP_WINDOW_MS = 100; // 100ms window for deduplication
+    
+    // Diagnostic counters
+    uint32_t packets_sent;
+    uint32_t packets_received;
+    uint32_t send_failures;
+    uint32_t last_stats_time;
+    
+    // Non-ACK device detection
+    uint32_t consecutive_retries;
+    uint32_t last_retry_detection_time;
 
     /**
      * @brief Initialize socket with proper options

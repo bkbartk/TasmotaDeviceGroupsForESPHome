@@ -12,9 +12,9 @@
 
 // Default buffer size for UDP packets
 #define DEFAULT_BUFFER_SIZE 1024
-#define MAX_RETRIES 3
-#define RETRY_DELAY_MS 10
-#define DEDUP_WINDOW_MS 100  // 100ms window for deduplication
+#define MAX_RETRIES 5
+#define RETRY_DELAY_MS 25
+#define DEDUP_WINDOW_MS 200  // 200ms window for deduplication (increased from 100ms)
 
 static const char *const TAG = "dgr";
 
@@ -22,7 +22,9 @@ device_groups_WiFiUDP::device_groups_WiFiUDP() : sock_fd(-1), is_connected(false
                      send_buffer(nullptr), recv_buffer(nullptr), 
                      send_buffer_size(0), recv_buffer_size(0), 
                      send_data_length(0), recv_data_length(0), recv_read_position(0),
-                     last_packet_hash(0), last_packet_time(0) {
+                     last_packet_hash(0), last_packet_time(0), 
+                     packets_sent(0), packets_received(0), send_failures(0), last_stats_time(0),
+                     consecutive_retries(0), last_retry_detection_time(0) {
     memset(&remote_addr, 0, sizeof(remote_addr));
     memset(&sender_addr, 0, sizeof(sender_addr));
     remote_addr.sin_family = AF_INET;
@@ -90,12 +92,29 @@ bool device_groups_WiFiUDP::setSocketOptions() {
         return false;
     }
     
-    // Set receive timeout
+    // Set receive timeout (shorter for better responsiveness)
     struct timeval tv;
-    tv.tv_sec = 1;  // 1 second timeout
-    tv.tv_usec = 0;
+    tv.tv_sec = 0;  // 0 seconds
+    tv.tv_usec = 100000;  // 100ms timeout (reduced from 1 second)
     if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
         ESP_LOGW(TAG, "Failed to set receive timeout: %s", strerror(errno));
+    }
+    
+    // Set send timeout to prevent blocking
+    tv.tv_sec = 0;
+    tv.tv_usec = 100000;  // 100ms timeout
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+        ESP_LOGW(TAG, "Failed to set send timeout: %s", strerror(errno));
+    }
+    
+    // Set socket buffer sizes for better performance
+    int buffer_size = 8192;  // 8KB buffer
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size)) < 0) {
+        ESP_LOGW(TAG, "Failed to set receive buffer size: %s", strerror(errno));
+    }
+    
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size)) < 0) {
+        ESP_LOGW(TAG, "Failed to set send buffer size: %s", strerror(errno));
     }
     
     return true;
@@ -248,8 +267,58 @@ bool device_groups_WiFiUDP::endPacket() {
         return false;
     }
     
-    ESP_LOGVV(TAG, "Attempting to send UDP packet: %d bytes to %s:%d", 
-             send_data_length, inet_ntoa(remote_addr.sin_addr), ntohs(remote_addr.sin_port));
+    // Detect potential retry loops (Arduino devices not sending ACKs)
+    uint32_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
+    bool potential_retry_loop = false;
+    
+    // Check if we're sending to the same address repeatedly within a short time
+    static struct sockaddr_in last_remote_addr = {0};
+    static uint32_t last_send_time = 0;
+    
+    if (memcmp(&remote_addr, &last_remote_addr, sizeof(remote_addr)) == 0) {
+        if (current_time - last_send_time < 2000) { // Same address within 2 seconds
+            consecutive_retries++;
+            if (consecutive_retries > 10) { // More than 10 retries to same address
+                potential_retry_loop = true;
+                ESP_LOGW(TAG, "Potential retry loop detected to %s:%d (attempt %u) - likely non-ACK device", 
+                         inet_ntoa(remote_addr.sin_addr), ntohs(remote_addr.sin_port), consecutive_retries);
+            }
+        } else {
+            consecutive_retries = 0; // Reset if enough time has passed
+        }
+    } else {
+        consecutive_retries = 0; // Reset for new address
+    }
+    
+    last_remote_addr = remote_addr;
+    last_send_time = current_time;
+    
+    // Check if we're sending an ACK packet for diagnostic purposes
+    bool sending_ack = false;
+    if (send_data_length >= 20 && strncmp(send_buffer, "TASMOTA_DGR", 11) == 0) {
+        if (send_data_length > 16) {
+            uint16_t flags = (send_buffer[16] << 8) | send_buffer[15];
+            sending_ack = (flags & 0x08) != 0;  // DGR_FLAG_ACK = 8
+        }
+    }
+    
+    ESP_LOGVV(TAG, "Attempting to send UDP packet: %d bytes to %s:%d (retry count: %u, ACK: %s)", 
+             send_data_length, inet_ntoa(remote_addr.sin_addr), ntohs(remote_addr.sin_port), consecutive_retries,
+             sending_ack ? "yes" : "no");
+             
+    // Log ACK packets at higher verbosity for debugging
+    if (sending_ack) {
+        ESP_LOGD(TAG, "Sending ACK packet to %s:%d", 
+                 inet_ntoa(remote_addr.sin_addr), ntohs(remote_addr.sin_port));
+    }
+    
+    // If we detect a retry loop, introduce progressive delays to reduce flooding
+    if (potential_retry_loop && consecutive_retries > 20) {
+        uint32_t delay_ms = (consecutive_retries - 20) * 100; // Progressive delay
+        if (delay_ms > 2000) delay_ms = 2000; // Cap at 2 seconds
+        ESP_LOGD(TAG, "Introducing delay of %ums to reduce retry flooding", delay_ms);
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
     
     int retries = MAX_RETRIES;
     while (retries-- > 0) {
@@ -257,29 +326,54 @@ bool device_groups_WiFiUDP::endPacket() {
                               (struct sockaddr*)&remote_addr, sizeof(remote_addr));
         
         if (sent >= 0) {
-            // Reduced logging verbosity to prevent performance issues during packet storms
-            // ESP_LOGD(TAG, "UDP packet sent successfully (%d bytes)", (int)sent);
-            // Clear the send buffer completely
-            send_data_length = 0;
-            if (send_buffer) {
-                memset(send_buffer, 0, send_buffer_size);
+            // Verify that the entire packet was sent
+            if (sent == send_data_length) {
+                // ESP_LOGD(TAG, "UDP packet sent successfully (%d bytes)", (int)sent);
+                packets_sent++;
+                // Clear the send buffer completely
+                send_data_length = 0;
+                if (send_buffer) {
+                    memset(send_buffer, 0, send_buffer_size);
+                }
+                
+                // Log stats periodically
+                uint32_t current_time = esp_timer_get_time() / 1000000; // Convert to seconds
+                if (current_time - last_stats_time > 60) { // Every 60 seconds
+                    ESP_LOGI(TAG, "UDP Stats: Sent=%u, Received=%u, Failures=%u", 
+                             packets_sent, packets_received, send_failures);
+                    last_stats_time = current_time;
+                }
+                
+                return true;
+            } else {
+                ESP_LOGW(TAG, "Partial packet send: %d of %d bytes sent", (int)sent, send_data_length);
+                // Don't count this as a successful send, continue retrying
             }
-            return true;
+        } else {
+            int error = errno;
+            if (error == EAGAIN || error == EWOULDBLOCK) {
+                // Non-blocking socket would block, try again
+                ESP_LOGVV(TAG, "Socket would block, retrying... (%d retries left)", retries);
+                vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS));
+                continue;
+            } else if (error == ENOBUFS || error == ENOMEM) {
+                // Network buffer full, wait longer before retrying
+                ESP_LOGW(TAG, "Network buffer full, waiting longer... (%d retries left)", retries);
+                vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS * 2));
+                continue;
+            } else {
+                ESP_LOGE(TAG, "Failed to send UDP packet: %s (retries left: %d)", strerror(error), retries);
+                break;
+            }
         }
         
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // Non-blocking socket would block, try again
-            // Reduced logging verbosity
-            // ESP_LOGD(TAG, "Socket would block, retrying... (%d retries left)", retries);
+        if (retries > 0) {
             vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS));
-            continue;
         }
-        
-        ESP_LOGE(TAG, "Failed to send UDP packet: %s (retries left: %d)", strerror(errno), retries);
-        break;
     }
     
     ESP_LOGE(TAG, "All retry attempts failed for UDP packet transmission");
+    send_failures++;
     return false;
 }
 
@@ -349,22 +443,35 @@ int device_groups_WiFiUDP::parsePacket() {
                                (struct sockaddr*)&temp_sender_addr, &sender_len);
     
     if (received > 0) {
-        // Simple packet deduplication to prevent storms
+        // Smart packet deduplication - be more lenient with ACK packets
         uint32_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
         uint32_t packet_hash = 0;
         
-        // Simple hash of packet content and sender
-        for (int i = 0; i < received && i < 16; i++) { // Hash first 16 bytes
+        // Check if this might be an ACK packet by looking at packet structure
+        bool is_likely_ack = false;
+        if (received >= 20 && strncmp(recv_buffer, "TASMOTA_DGR", 11) == 0) {
+            // Look at the flags field (typically at offset 15-16 in device group messages)
+            if (received > 16) {
+                uint16_t flags = (recv_buffer[16] << 8) | recv_buffer[15];
+                is_likely_ack = (flags & 0x08) != 0;  // DGR_FLAG_ACK = 8
+            }
+        }
+        
+        // Generate hash of packet content and sender for deduplication
+        for (int i = 0; i < received && i < 32; i++) { // Hash first 32 bytes
             packet_hash = ((packet_hash << 5) + packet_hash) + recv_buffer[i];
         }
         packet_hash ^= temp_sender_addr.sin_addr.s_addr;
         packet_hash ^= temp_sender_addr.sin_port;
+        packet_hash ^= (uint32_t)received;  // Include packet size in hash
         
         // Check if this is a duplicate packet within the deduplication window
+        // Use shorter deduplication window for ACK packets (they're more time-sensitive)
+        uint32_t dedup_window = is_likely_ack ? (DEDUP_WINDOW_MS / 4) : DEDUP_WINDOW_MS;
         if (packet_hash == last_packet_hash && 
-            (current_time - last_packet_time) < DEDUP_WINDOW_MS) {
-            ESP_LOGVV(TAG, "Dropping duplicate packet (hash: 0x%08x, time: %d ms)", 
-                     packet_hash, current_time - last_packet_time);
+            (current_time - last_packet_time) < dedup_window) {
+            ESP_LOGVV(TAG, "Dropping duplicate packet (hash: 0x%08x, time: %d ms, ACK: %s)", 
+                     packet_hash, current_time - last_packet_time, is_likely_ack ? "yes" : "no");
             return 0;
         }
         
@@ -379,8 +486,19 @@ int device_groups_WiFiUDP::parsePacket() {
         // Store sender info separately - DON'T overwrite remote_addr!
         sender_addr = temp_sender_addr;
         
-        ESP_LOGVV(TAG, "Received UDP packet: %d bytes from %s:%d (hash: 0x%08x)", 
-                 (int)received, inet_ntoa(sender_addr.sin_addr), ntohs(sender_addr.sin_port), packet_hash);
+        // Check if this is an ACK packet for diagnostic purposes
+        bool is_ack_response = is_likely_ack;
+        ESP_LOGVV(TAG, "Received UDP packet: %d bytes from %s:%d (hash: 0x%08x, ACK: %s)", 
+                 (int)received, inet_ntoa(sender_addr.sin_addr), ntohs(sender_addr.sin_port), packet_hash,
+                 is_ack_response ? "yes" : "no");
+        
+        packets_received++;
+        
+        // Log ACK packets at higher verbosity for debugging
+        if (is_ack_response) {
+            ESP_LOGD(TAG, "ACK packet received from %s:%d", 
+                     inet_ntoa(sender_addr.sin_addr), ntohs(sender_addr.sin_port));
+        }
         
         return recv_data_length;
     } else if (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
